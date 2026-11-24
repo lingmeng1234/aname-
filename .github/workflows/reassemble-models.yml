@@ -65,7 +65,7 @@ jobs:
               if not source.is_file():
                   raise SystemExit(f"Missing root model file: {name}")
               data = source.read_bytes()
-              git_header = b"blob " + str(len(data)).encode("ascii") + b"\\0"
+              git_header = b"blob " + str(len(data)).encode("ascii") + b"\0"
               git_sha = hashlib.sha1(git_header + data).hexdigest()
               if len(data) != size or git_sha != expected_git_sha:
                   raise SystemExit(f"{name}: model integrity check failed")
