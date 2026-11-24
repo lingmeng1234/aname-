@@ -1,0 +1,88 @@
+name: Reassemble ONNX model transfer
+
+on:
+  push:
+    paths:
+      - ".github/workflows/reassemble-models.yml"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  reassemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout transfer files
+        uses: actions/checkout@v4
+
+      - name: Reassemble and verify archive and models
+        shell: bash
+        run: |
+          python - <<'PY'
+          import base64
+          import hashlib
+          import json
+          import zipfile
+          from pathlib import Path
+
+          manifest = json.loads(Path("AmaneChunks3/manifest.json").read_text(encoding="utf-8"))
+          expected_count = int(manifest["total_chunks"])
+          encoded = []
+          for index in range(1, expected_count + 1):
+              filename = f"chunk_{index:04d}.txt"
+              folders = ("AmaneChunks", "AmaneChunks2", "AmaneChunks3")
+              matches = [Path(folder) / filename for folder in folders if (Path(folder) / filename).is_file()]
+              if len(matches) != 1:
+                  raise SystemExit(f"{filename}: expected exactly one chunk, found {len(matches)}")
+              encoded.append(matches[0].read_text(encoding="ascii").strip())
+
+          payload = base64.b64decode("".join(encoded), validate=True)
+          if len(payload) != manifest["size"]:
+              raise SystemExit(f"Archive size mismatch: {len(payload)} != {manifest['size']}")
+          digest = hashlib.sha256(payload).hexdigest()
+          if digest != manifest["sha256"]:
+              raise SystemExit(f"Archive SHA-256 mismatch: {digest}")
+
+          archive = Path(manifest["filename"])
+          archive.write_bytes(payload)
+          with zipfile.ZipFile(archive) as zf:
+              bad = zf.testzip()
+              if bad:
+                  raise SystemExit(f"Corrupt ZIP member: {bad}")
+              members = [n for n in zf.namelist() if Path(n).name in {
+                  "face_detect_genderage.onnx", "face_detect_scrfd.onnx"
+              }]
+              expected_names = {"face_detect_genderage.onnx", "face_detect_scrfd.onnx"}
+              found_names = {Path(n).name for n in members}
+              if found_names != expected_names:
+                  raise SystemExit(f"Missing model(s): {expected_names - found_names}")
+              out = Path("reassembled")
+              out.mkdir(exist_ok=True)
+              expected = {
+                  "face_detect_genderage.onnx": (1322532, "c1a68b8db319d8d5c78f27136822ef1313c51a77"),
+                  "face_detect_scrfd.onnx": (16923827, "bbfebbab00217df73af23fca160236208bb69616"),
+              }
+              for member in members:
+                  name = Path(member).name
+                  data = zf.read(member)
+                  size, expected_git_sha = expected[name]
+                  git_sha = hashlib.sha1(f"blob {len(data)}\\0".encode() + data).hexdigest()
+                  if len(data) != size or git_sha != expected_git_sha:
+                      raise SystemExit(f"{name}: model integrity check failed")
+                  (out / name).write_bytes(data)
+
+          print(f"Verified archive: {len(payload)} bytes; SHA-256 {digest}")
+          for path in sorted(Path("reassembled").glob("*.onnx")):
+              print(f"Verified model: {path.name} ({path.stat().st_size} bytes)")
+          PY
+
+      - name: Upload verified transfer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amane-model-transfer
+          path: |
+            AmaneTransfer.zip
+            reassembled/*.onnx
+          if-no-files-found: error
+          retention-days: 3
